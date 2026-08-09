@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ScreenTime Guard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/lucide@latest"></script>
+<style>
+  body { margin:0; background:#12151C; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  input[type="range"] { -webkit-appearance: none; height: 4px; border-radius: 2px; background: #2A2F3D; }
+  input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%; background: #4FBFA6; cursor: pointer; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ---- lucide icon wrapper (using window.lucide via CDN + manual svg fallback) ----
+function Icon({ name, size = 18, style = {} }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (ref.current && window.lucide) {
+      ref.current.innerHTML = "";
+      const svg = window.lucide.icons[name];
+    }
+  }, [name]);
+  // Using inline lucide via createElement isn't trivial without their React package,
+  // so we fall back to simple emoji glyphs mapped per icon key for reliability offline.
+  const GLYPH = {
+    instagram: "📷", youtube: "▶️", chat: "💬", game: "🎮",
+    music: "🎵", shop: "🛍️", camera: "📸", mail: "✉️",
+    plus: "+", x: "✕", play: "▶", pause: "⏸", reset: "↺", warn: "⚠️"
+  };
+  return <span style={{ fontSize: size, lineHeight: 1, ...style }}>{GLYPH[name] || "•"}</span>;
+}
+
+const ICON_LIST = ["instagram", "youtube", "chat", "game", "music", "shop", "camera", "mail"];
+
+const DEFAULT_APPS = [
+  { id: "a1", name: "Instagram", icon: "instagram", limitMin: 45, usedSec: 22 * 60 },
+  { id: "a2", name: "YouTube", icon: "youtube", limitMin: 60, usedSec: 38 * 60 },
+  { id: "a3", name: "Messages", icon: "chat", limitMin: 30, usedSec: 9 * 60 },
+];
+
+function fmt(sec) {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  const h = Math.floor(m / 60);
+  const mm = m % 60;
+  if (h > 0) return `${h}h ${mm}m`;
+  if (m > 0) return `${m}m ${s.toString().padStart(2, "0")}s`;
+  return `${s}s`;
+}
+
+function statusOf(usedSec, limitMin) {
+  const pct = usedSec / (limitMin * 60);
+  if (pct >= 1) return "over";
+  if (pct >= 0.8) return "warn";
+  return "good";
+}
+
+const STATUS_COLOR = { good: "#4FBFA6", warn: "#E8A33D", over: "#E2584A" };
+const STATUS_LABEL = { good: "On track", warn: "Almost there", over: "Over limit" };
+
+function Ring({ pct, color, size = 56, stroke = 5 }) {
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const clamped = Math.min(pct, 1);
+  return (
+    <svg width={size} height={size} style={{ transform: "rotate(-90deg)" }}>
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#2A2F3D" strokeWidth={stroke} />
+      <circle
+        cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth={stroke}
+        strokeDasharray={c} strokeDashoffset={c - clamped * c} strokeLinecap="round"
+        style={{ transition: "stroke-dashoffset 0.4s ease" }}
+      />
+    </svg>
+  );
+}
+
+function AddAppSheet({ onClose, onAdd }) {
+  const [name, setName] = useState("");
+  const [icon, setIcon] = useState("instagram");
+  const [limit, setLimit] = useState(30);
+  return (
+    <div className="fixed inset-0 z-30 flex items-end justify-center">
+      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
+      <div className="relative w-full max-w-sm rounded-t-3xl p-5 pb-7" style={{ background: "#1A1E28" }}>
+        <div className="mx-auto mb-4 h-1 w-10 rounded-full" style={{ background: "#2A2F3D" }} />
+        <div className="mb-5 flex items-center justify-between">
+          <h2 className="text-lg font-semibold" style={{ color: "#E9EBF1" }}>Track a new app</h2>
+          <button onClick={onClose} style={{ color: "#868C9E" }}><Icon name="x" size={20} /></button>
+        </div>
+        <label className="block text-xs mb-1.5 font-medium tracking-wide" style={{ color: "#868C9E" }}>APP NAME</label>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. TikTok"
+          className="w-full mb-4 rounded-xl px-3.5 py-2.5 text-sm outline-none"
+          style={{ background: "#212632", color: "#E9EBF1", border: "1px solid #2A2F3D" }} />
+        <label className="block text-xs mb-1.5 font-medium tracking-wide" style={{ color: "#868C9E" }}>ICON</label>
+        <div className="flex gap-2 mb-4 flex-wrap">
+          {ICON_LIST.map((k) => {
+            const active = icon === k;
+            return (
+              <button key={k} onClick={() => setIcon(k)} className="p-2.5 rounded-xl"
+                style={{ background: active ? "#4FBFA6" : "#212632", border: "1px solid " + (active ? "#4FBFA6" : "#2A2F3D") }}>
+                <Icon name={k} size={18} />
+              </button>
+            );
+          })}
+        </div>
+        <label className="block text-xs mb-1.5 font-medium tracking-wide" style={{ color: "#868C9E" }}>DAILY LIMIT — {limit} min</label>
+        <input type="range" min="5" max="180" step="5" value={limit} onChange={(e) => setLimit(Number(e.target.value))} className="w-full mb-6" />
+        <button disabled={!name.trim()} onClick={() => {
+            if (!name.trim()) return;
+            onAdd({ id: "a" + Date.now(), name: name.trim(), icon, limitMin: limit, usedSec: 0 });
+            onClose();
+          }}
+          className="w-full rounded-xl py-3 text-sm font-semibold disabled:opacity-40"
+          style={{ background: "#4FBFA6", color: "#12151C" }}>
+          Start tracking
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function AppCard({ app, onRemove, onSimToggle, simActive }) {
+  const pct = app.usedSec / (app.limitMin * 60);
+  const status = statusOf(app.usedSec, app.limitMin);
+  const color = STATUS_COLOR[status];
+  return (
+    <div className="rounded-2xl p-4 flex items-center gap-3.5"
+      style={{ background: "#1A1E28", border: `1px solid ${status === "over" ? "#E2584A55" : "#242938"}` }}>
+      <div className="relative flex items-center justify-center shrink-0" style={{ width: 56, height: 56 }}>
+        <Ring pct={pct} color={color} />
+        <div className="absolute inset-0 flex items-center justify-center"><Icon name={app.icon} size={20} /></div>
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center justify-between gap-2">
+          <span className="font-semibold text-sm truncate" style={{ color: "#E9EBF1" }}>{app.name}</span>
+          <button onClick={() => onRemove(app.id)} style={{ color: "#5A6072" }}><Icon name="x" size={13} /></button>
+        </div>
+        <div className="flex items-center gap-1.5 mt-0.5">
+          <span className="text-xs font-mono" style={{ color: "#868C9E" }}>{fmt(app.usedSec)} / {app.limitMin}m</span>
+          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full" style={{ background: color + "22", color }}>
+            {STATUS_LABEL[status]}
+          </span>
+        </div>
+      </div>
+      <button onClick={() => onSimToggle(app.id)} className="p-2 rounded-full shrink-0"
+        style={{ background: simActive ? color + "22" : "#212632", color: simActive ? color : "#868C9E" }}
+        title="Simulate usage (demo)">
+        <Icon name={simActive ? "pause" : "play"} size={15} />
+      </button>
+    </div>
+  );
+}
+
+function WarningToast({ app, status, onDismiss }) {
+  const color = STATUS_COLOR[status];
+  return (
+    <div className="fixed top-4 left-1/2 -translate-x-1/2 z-40 w-[92%] max-w-sm rounded-2xl px-4 py-3 flex items-center gap-3 shadow-lg"
+      style={{ background: "#1A1E28", border: `1px solid ${color}55` }}>
+      <div className="p-2 rounded-full shrink-0" style={{ background: color + "22", color }}><Icon name="warn" size={18} /></div>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-semibold" style={{ color: "#E9EBF1" }}>
+          {status === "over" ? `${app.name} limit reached` : `Approaching ${app.name} limit`}
+        </p>
+        <p className="text-xs" style={{ color: "#868C9E" }}>{fmt(app.usedSec)} of {app.limitMin}m used today</p>
+      </div>
+      <button onClick={onDismiss} style={{ color: "#5A6072" }}><Icon name="x" size={16} /></button>
+    </div>
+  );
+}
+
+function ScreenTimeGuard() {
+  const [apps, setApps] = useState(() => {
+    try {
+      const saved = localStorage.getItem("screentime-apps");
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return DEFAULT_APPS;
+  });
+  const [showAdd, setShowAdd] = useState(false);
+  const [simIds, setSimIds] = useState({});
+  const [toast, setToast] = useState(null);
+  const [notified, setNotified] = useState({});
+
+  useEffect(() => {
+    try { localStorage.setItem("screentime-apps", JSON.stringify(apps)); } catch (e) {}
+  }, [apps]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setApps((prev) => prev.map((a) => (simIds[a.id] ? { ...a, usedSec: a.usedSec + 20 } : a)));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [simIds]);
+
+  useEffect(() => {
+    for (const app of apps) {
+      const status = statusOf(app.usedSec, app.limitMin);
+      if ((status === "warn" || status === "over") && notified[app.id] !== status) {
+        setToast({ app, status });
+        setNotified((n) => ({ ...n, [app.id]: status }));
+        break;
+      }
+    }
+  }, [apps]);
+
+  const addApp = useCallback((app) => setApps((p) => [...p, app]), []);
+  const removeApp = useCallback((id) => {
+    setApps((p) => p.filter((a) => a.id !== id));
+    setSimIds((s) => { const c = { ...s }; delete c[id]; return c; });
+  }, []);
+  const toggleSim = useCallback((id) => setSimIds((s) => ({ ...s, [id]: !s[id] })), []);
+  const resetDay = useCallback(() => {
+    setApps((p) => p.map((a) => ({ ...a, usedSec: 0 })));
+    setNotified({});
+    setSimIds({});
+  }, []);
+
+  const totalUsed = apps.reduce((s, a) => s + a.usedSec, 0);
+  const totalLimit = apps.reduce((s, a) => s + a.limitMin * 60, 0);
+  const overCount = apps.filter((a) => statusOf(a.usedSec, a.limitMin) === "over").length;
+
+  return (
+    <div className="min-h-screen w-full flex justify-center" style={{ background: "#12151C" }}>
+      <div className="w-full max-w-sm relative pb-28">
+        {toast && <WarningToast app={toast.app} status={toast.status} onDismiss={() => setToast(null)} />}
+        <div className="px-5 pt-8 pb-4">
+          <p className="text-xs font-semibold tracking-widest" style={{ color: "#5A6072" }}>TODAY</p>
+          <div className="flex items-end justify-between mt-1">
+            <h1 className="text-3xl font-bold" style={{ color: "#E9EBF1", fontFamily: "ui-monospace, monospace" }}>{fmt(totalUsed)}</h1>
+            <button onClick={resetDay} className="flex items-center gap-1 text-xs pb-1" style={{ color: "#868C9E" }}>
+              <Icon name="reset" size={12} /> Reset
+            </button>
+          </div>
+          <p className="text-xs mt-1" style={{ color: "#5A6072" }}>
+            {fmt(totalLimit)} budgeted across {apps.length} app{apps.length !== 1 ? "s" : ""}
+            {overCount > 0 && <span style={{ color: "#E2584A" }}> · {overCount} over limit</span>}
+          </p>
+        </div>
+        <div className="px-5 mb-5">
+          <div className="rounded-2xl p-5 flex items-center gap-4" style={{ background: "#1A1E28", border: "1px solid #242938" }}>
+            <div className="relative flex items-center justify-center shrink-0" style={{ width: 72, height: 72 }}>
+              <Ring size={72} stroke={6} pct={totalLimit ? totalUsed / totalLimit : 0} color={overCount > 0 ? "#E2584A" : "#4FBFA6"} />
+              <div className="absolute inset-0 flex items-center justify-center text-xs font-bold" style={{ color: "#E9EBF1" }}>
+                {totalLimit ? Math.min(100, Math.round((totalUsed / totalLimit) * 100)) : 0}%
+              </div>
+            </div>
+            <div>
+              <p className="text-sm font-semibold" style={{ color: "#E9EBF1" }}>Daily budget</p>
+              <p className="text-xs mt-0.5 leading-relaxed" style={{ color: "#868C9E" }}>
+                Tap play on any app below to simulate live usage and preview how the warning works.
+              </p>
+            </div>
+          </div>
+        </div>
+        <div className="px-5 flex flex-col gap-2.5">
+          {apps.map((app) => (
+            <AppCard key={app.id} app={app} onRemove={removeApp} onSimToggle={toggleSim} simActive={!!simIds[app.id]} />
+          ))}
+          {apps.length === 0 && (
+            <div className="rounded-2xl p-6 text-center" style={{ background: "#1A1E28", border: "1px dashed #2A2F3D" }}>
+              <p className="text-sm" style={{ color: "#868C9E" }}>No apps tracked yet. Add one to get started.</p>
+            </div>
+          )}
+        </div>
+        <button onClick={() => setShowAdd(true)}
+          className="fixed bottom-7 left-1/2 -translate-x-1/2 flex items-center gap-2 rounded-full px-5 py-3 text-sm font-semibold shadow-lg"
+          style={{ background: "#4FBFA6", color: "#12151C" }}>
+          <Icon name="plus" size={16} /> Add app
+        </button>
+        {showAdd && <AddAppSheet onClose={() => setShowAdd(false)} onAdd={addApp} />}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<ScreenTimeGuard />);
+</script>
+</body>
+</html>
